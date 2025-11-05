@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Mini Runner — Simple Temple-Run Style Game</title>
+  <style>
+    :root{
+      --bg:#e9f2ff;
+      --ground:#2e7d32;
+      --player:#ffb300;
+      --obs:#d32f2f;
+      --panel:#ffffffcc;
+    }
+    html,body{height:100%;margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,"Helvetica Neue",Arial;}
+    body{
+      display:flex;align-items:center;justify-content:center;
+      background:linear-gradient(180deg,var(--bg) 0%, #cfe8ff 100%);
+      padding:20px;
+    }
+    .game-wrap{
+      width:100%;max-width:480px;background:var(--panel);border-radius:12px;box-shadow:0 10px 30px rgba(10,20,40,0.12);overflow:hidden;
+    }
+    header{
+      display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:rgba(255,255,255,0.7);
+      border-bottom:1px solid #eee;
+    }
+    header h1{font-size:16px;margin:0}
+    .controls{display:flex;gap:8px;align-items:center}
+    .btn{padding:8px 10px;border-radius:8px;border:none;background:#1976d2;color:white;cursor:pointer;font-weight:600}
+    canvas{display:block;width:100%;height:360px;background:linear-gradient(#87ceeb,#a7dbff);touch-action:none;}
+    .info{display:flex;gap:10px;padding:10px 14px;align-items:center;justify-content:space-between}
+    .score{font-weight:700}
+    .hint{font-size:12px;color:#555}
+    footer{padding:10px 14px;font-size:12px;color:#444;background:#fff;border-top:1px solid #eee;text-align:center}
+    /* mobile extra */
+    @media (max-width:420px){
+      canvas{height:300px}
+      header h1{font-size:14px}
+    }
+  </style>
+</head>
+<body>
+  <div class="game-wrap">
+    <header>
+      <h1>Mini Runner</h1>
+      <div class="controls">
+        <div class="score" id="scoreDisplay">Score: 0</div>
+        <button id="restartBtn" class="btn">Restart</button>
+      </div>
+    </header>
+
+    <canvas id="gameCanvas" width="800" height="480"></canvas>
+
+    <div class="info">
+      <div class="hint">Space / ↑ = Jump • Hold ↓ = Duck • Tap = Jump / Hold = Duck</div>
+      <div id="speedDisplay">Speed: 1.0x</div>
+    </div>
+
+    <footer>Built with HTML5 Canvas — Save as <code>index.html</code> & open in browser</footer>
+  </div>
+
+  <script>
+  (function(){
+    // Canvas & context
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+
+    // UI elements
+    const scoreDisplay = document.getElementById('scoreDisplay');
+    const speedDisplay = document.getElementById('speedDisplay');
+    const restartBtn = document.getElementById('restartBtn');
+
+    // Game size (virtual)
+    const VW = 800, VH = 480;
+    // Keep canvas resolution consistent (pixel ratio)
+    function fitCanvas() {
+      const ratio = window.devicePixelRatio || 1;
+      const displayW = canvas.clientWidth;
+      const displayH = canvas.clientHeight;
+      canvas.width = Math.round(displayW * ratio);
+      canvas.height = Math.round(displayH * ratio);
+      ctx.setTransform(ratio * (VW/displayW), 0, 0, ratio * (VH/displayH), 0, 0);
+    }
+    fitCanvas();
+    window.addEventListener('resize', fitCanvas);
+
+    // Game state
+    let running = false;
+    let lastTs = 0;
+    let score = 0;
+    let speed = 200; // ground speed px/sec (will increase)
+    let difficultyTimer = 0;
+
+    // Player properties
+    const player = {
+      x: 120,
+      y: VH - 120, // base y (top-left origin)
+      w: 48,
+      h: 64,
+      vy: 0,
+      gravity: 1600,
+      jumpForce: -650,
+      onGround: true,
+      ducking: false,
+      duckHeight: 36,
+    };
+
+    // Ground
+    const groundY = VH - 64;
+    // Obstacles array
+    let obstacles = [];
+
+    // Spawn control
+    let spawnTimer = 0;
+    let spawnInterval = 1.4; // seconds (will reduce as speed increases)
+
+    // Input state
+    let keys = {};
+    let touchDown = false;
+    let lastTap = 0;
+
+    // Helper - reset game
+    function resetGame() {
+      running = true;
+      lastTs = 0;
+      score = 0;
+      speed = 200;
+      difficultyTimer = 0;
+      player.y = VH - 120;
+      player.vy = 0;
+      player.onGround = true;
+      player.ducking = false;
+      obstacles = [];
+      spawnTimer = 0;
+      spawnInterval = 1.4;
+      updateUI();
+      loop(performance.now());
+    }
+
+    // UI update
+    function updateUI(){
+      scoreDisplay.textContent = 'Score: ' + Math.floor(score);
+      speedDisplay.textContent = 'Speed: ' + (speed/200).toFixed(2) + 'x';
+    }
+
+    // Spawn obstacle (type can vary)
+    function spawnObstacle() {
+      const types = ['small','tall','gap']; // gap = low obstacle you must jump over? We'll implement as tall or small
+      // Decide obstacle type by random
+      const t = Math.random() < 0.25 ? 'tall' : 'small';
+      const w = t === 'tall' ? 48 : 34;
+      const h = t === 'tall' ? 96 : 46;
+      const obs = {
+        x: VW + 30,
+        y: groundY - h + 16, // align to ground visually
+        w: w,
+        h: h,
+        passed: false
+      };
+      obstacles.push(obs);
+    }
+
+    // Collision detection AABB
+    function collides(a,b){
+      return !(a.x + a.w < b.x || a.x > b.x + b.w || a.y + a.h < b.y || a.y > b.y + b.h);
+    }
+
+    // Game loop
+    function loop(ts){
+      if (!running) return;
+      if (!lastTs) lastTs = ts;
+      const dt = Math.min((ts - lastTs) / 1000, 0.05); // seconds, clamp for stability
+      lastTs = ts;
+
+      // Increase difficulty gradually
+      difficultyTimer += dt;
+      if (difficultyTimer > 5) {
+        difficultyTimer = 0;
+        speed += 12; // increase speed slightly every 5 seconds
+        spawnInterval = Math.max(0.6, spawnInterval - 0.05);
+      }
+
+      // Update player: input
+      // Jump
+      if ((keys['ArrowUp'] || keys[' '] || keys['w']) && player.onGround && !player.ducking) {
+        player.vy = player.jumpForce;
+        player.onGround = false;
+      }
+      // Duck: hold ArrowDown or touch hold
+      player.ducking = !!(keys['ArrowDown'] || keys['s'] || touchDown);
+
+      // Update physics
+      if (!player.onGround) {
+        player.vy += player.gravity * dt;
+        player.y += player.vy * dt;
+        if (player.y >= (VH - 120)) {
+          player.y = VH - 120;
+          player.vy = 0;
+          player.onGround = true;
+        }
+      }
+
+      // If ducking, reduce height
+      const playerBox = {
+        x: player.x,
+        y: player.ducking ? player.y + (player.h - player.duckHeight) : player.y,
+        w: player.w,
+        h: player.ducking ? player.duckHeight : player.h
+      };
+
+      // Spawn obstacles
+      spawnTimer += dt;
+      if (spawnTimer >= spawnInterval) {
+        spawnTimer = 0;
+        spawnObstacle();
+      }
+
+      // Move obstacles and check collisions
+      for (let i = obstacles.length -1; i>=0; i--){
+        const o = obstacles[i];
+        o.x -= speed * dt;
+        // passed => increase score once
+        if (!o.passed && o.x + o.w < player.x) {
+          o.passed = true;
+          score += 10;
+        }
+        // collision
+        const obsBox = {x:o.x, y:o.y, w:o.w, h:o.h};
+        if (collides(playerBox, obsBox)) {
+          // hit
+          running = false;
+          showGameOver();
+        }
+        // remove offscreen
+        if (o.x + o.w < -50) obstacles.splice(i,1);
+      }
+
+      // Increase score by distance
+      score += dt * (speed/80);
+
+      // Draw scene
+      draw();
+
+      updateUI();
+
+      requestAnimationFrame(loop);
+    }
+
+    // Draw function
+    function draw(){
+      // clear
+      ctx.clearRect(0,0,VW,VH);
+
+      // sky gradient (already via CSS but we redraw shapes)
+      // ground
+      ctx.fillStyle = '#7bc96f';
+      ctx.fillRect(0, groundY, VW, VH - groundY);
+
+      // parallax hills
+      drawHills();
+
+      // obstacles
+      for (const o of obstacles){
+        ctx.fillStyle = '#d84315';
+        roundRect(ctx, o.x, o.y, o.w, o.h, 6);
+        // small highlight
+        ctx.fillStyle = 'rgba(255,255,255,0.08)';
+        ctx.fillRect(o.x + 6, o.y + 6, Math.max(0,o.w - 12), Math.max(0,o.h - 12));
+      }
+
+      // player
+      ctx.fillStyle = '#ffb300';
+      const px = player.x, py = playerBoxY();
+      const ph = player.ducking ? player.duckHeight : player.h;
+      roundRect(ctx, px, py, player.w, ph, 6);
+      // eye
+      ctx.fillStyle = '#222';
+      ctx.fillRect(px + 10, py + Math.max(6, ph/3 - 4), 6, 6);
+
+      // score top-left overlay (canvas)
+      ctx.fillStyle = 'rgba(0,0,0,0.35)';
+      ctx.fillRect(12,12,140,36);
+      ctx.fillStyle = '#fff';
+      ctx.font = '18px Inter, Arial';
+      ctx.fillText('Score: ' + Math.floor(score), 22, 36);
+    }
+
+    function drawHills(){
+      // simple parallax hills
+      ctx.fillStyle = '#8fca6e';
+      ctx.beginPath();
+      ctx.moveTo(0, groundY);
+      ctx.quadraticCurveTo(150, groundY - 60, 300, groundY - 10);
+      ctx.quadraticCurveTo(380, groundY + 20, 520, groundY - 40);
+      ctx.quadraticCurveTo(660, groundY - 110, VW, groundY);
+      ctx.lineTo(VW, VH); ctx.lineTo(0,VH);
+      ctx.closePath();
+      ctx.fill();
+
+      // mid-hill
+      ctx.fillStyle = '#7cc35f';
+      ctx.beginPath();
+      ctx.moveTo(0, groundY);
+      ctx.quadraticCurveTo(120, groundY - 30, 260, groundY + 10);
+      ctx.quadraticCurveTo(400, groundY + 60, 550, groundY - 20);
+      ctx.quadraticCurveTo(720, groundY - 90, VW, groundY);
+      ctx.lineTo(VW, VH); ctx.lineTo(0,VH);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    function roundRect(ctx,x,y,w,h,r){
+      ctx.beginPath();
+      ctx.moveTo(x+r,y);
+      ctx.arcTo(x+w,y,x+w,y+h,r);
+      ctx.arcTo(x+w,y+h,x,y+h,r);
+      ctx.arcTo(x,y+h,x,y,r);
+      ctx.arcTo(x,y,x+w,y,r);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    function playerBoxY(){
+      return player.ducking ? player.y + (player.h - player.duckHeight) : player.y;
+    }
+
+    // Input handlers
+    window.addEventListener('keydown', (e)=>{
+      keys[e.key] = true;
+      // prevent scrolling on space
+      if ([' ', 'ArrowUp','ArrowDown'].includes(e.key)) e.preventDefault();
+      // if game over and press space -> restart
+      if (!running && (e.key === ' ' || e.key === 'Enter')) resetGame();
+    });
+    window.addEventListener('keyup', (e)=>{
+      keys[e.key] = false;
+    });
+
+    // Touch controls: tap to jump, long press to duck
+    let touchTimeout = null;
+    canvas.addEventListener('touchstart', (e)=>{
+      e.preventDefault();
+      touchDown = true;
+      // quick tap detection
+      const now = Date.now();
+      if (now - lastTap < 300) { /* double tap - ignore */ }
+      lastTap = now;
+      // small delay: if they hold, we treat as duck; quick release is jump
+      touchTimeout = setTimeout(()=> {
+        // long press -> keep ducking
+        touchDown = true;
+      }, 80);
+    }, {passive:false});
+
+    canvas.addEventListener('touchend', (e) => {
+      e.preventDefault();
+      clearTimeout(touchTimeout);
+      // if they released quickly and were on ground -> jump
+      if (player.onGround && !player.ducking) {
+        // treat as jump
+        player.vy = player.jumpForce;
+        player.onGround = false;
+      }
+      // end of touch -> stop ducking
+      touchDown = false;
+    }, {passive:false});
+
+    // Mouse support: click to jump, mousedown to duck
+    canvas.addEventListener('mousedown', (e)=>{
+      e.preventDefault();
+      touchDown = true;
+    });
+    canvas.addEventListener('mouseup', (e)=>{
+      e.preventDefault();
+      // quick click -> jump
+      if (player.onGround && !player.ducking) {
+        player.vy = player.jumpForce;
+        player.onGround = false;
+      }
+      touchDown = false;
+    });
+
+    // Restart button
+    restartBtn.addEventListener('click', ()=>{
+      resetGame();
+    });
+
+    // If game over, show overlay and allow restart
+    function showGameOver(){
+      // draw overlay once
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      ctx.fillRect(0,0,VW,VH);
+      ctx.fillStyle = '#fff';
+      ctx.font = '34px Inter, Arial';
+      ctx.fillText('Game Over', VW/2 - 90, VH/2 - 10);
+      ctx.font = '18px Inter, Arial';
+      ctx.fillText('Score: ' + Math.floor(score), VW/2 - 42, VH/2 + 22);
+      ctx.font = '14px Inter, Arial';
+      ctx.fillText('Click Restart or press Space', VW/2 - 95, VH/2 + 56);
+    }
+
+    // Start the game initially
+    resetGame();
+
+    // Expose pause/resume with visibility change
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) running = false;
+      else if (!running) {
+        // don't auto-resume when game over
+        if (player && player.onGround) running = true, lastTs = performance.now(), loop(lastTs);
+      }
+    });
+
+  })();
+  </script>
+</body>
+</html>
